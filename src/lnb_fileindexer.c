@@ -88,7 +88,7 @@ int list_dir(const char *root_name)
     dir = opendir(root_name);
 
     if(!dir)
-        return 1;
+        return 0;
 
     while(1)
     {
@@ -111,19 +111,19 @@ int list_dir(const char *root_name)
             path_length = snprintf(path, PATH_MAX, "%s/%s", root_name, d_name);
 
         if(stat(path, &file_stat) < 0)
-            return 1;
+            return 0;
 
         if(path_length >= PATH_MAX)
             return 1;
 
         if(S_ISDIR(file_stat.st_mode) && !S_ISLNK(file_stat.st_mode))
         {
+            dir_list.perm[dir_list.len] = file_stat.st_mode & ALLPERMS;
+            dir_list.uid[dir_list.len] = file_stat.st_uid;
+            dir_list.gid[dir_list.len] = file_stat.st_gid;
+
             if(!list_add(&dir_list, path, path_length))
                 return 1;
-
-            dir_list.perm[i] = file_stat.st_mode & ALLPERMS;
-            dir_list.uid[i] = file_stat.st_uid;
-            dir_list.gid[i] = file_stat.st_gid;
 
             if(exclude_len > 0)
                 for(i = 0; i < exclude_len; i++)
@@ -135,17 +135,17 @@ int list_dir(const char *root_name)
         }
         else
         {
+            file_list.perm[file_list.len] = file_stat.st_mode & ALLPERMS;
+            file_list.uid[file_list.len] = file_stat.st_uid;
+            file_list.gid[file_list.len] = file_stat.st_gid;
+
             if(!list_add(&file_list, path, path_length))
                 return 1;
-
-            file_list.perm[i] = file_stat.st_mode & ALLPERMS;
-            file_list.uid[i] = file_stat.st_uid;
-            file_list.gid[i] = file_stat.st_gid;
         }
     }
 
     if(closedir(dir))
-        return 1;
+        return 0;
 
     return 0;
 }
@@ -201,7 +201,7 @@ int main(int argc, char **argv)
     list_init(&dir_list);
     list_init(&file_list);
 
-    if(!list_dir(argv[1]))
+    if(list_dir(argv[1]))
     {
         fprintf(stderr, "Error: Out of memory");
         return 1;
@@ -255,7 +255,6 @@ int main(int argc, char **argv)
     for(i = 0; i < THREAD_COUNT; i++)
         if(args[i].is_running)
             pthread_join(threads[i], NULL);
-
 
     file = fopen("/tmp/lnb_fileindexer_files", "w");
     if(file == NULL)
