@@ -11,14 +11,15 @@
 #include <sys/stat.h>
 #include <openssl/md5.h>
 
-#define E(x) {int __tmp_e = (x); if(__tmp_e)return __tmp_e;}
+#define E(x)   {int __tmp_e = (x); if(__tmp_e)return __tmp_e;}
+#define __STR(x) #x
+#define STR(x) __STR(x)
 
 #define LIST_CHUNK_SIZE  1048576
-#define LIST_MAX_CHUNKS  1024
-#define LIST_MAX_ENTRIES 16777216
-#define THREAD_COUNT     8
-#define FILES_PER_THREAD 1000
-#define FILE_CHUNK_SIZE  1048576
+#define LIST_MAX_CHUNKS  65536
+#define THREAD_COUNT     16
+#define FILE_CHUNK_SIZE  134217728
+
 
 char **exclude;
 int exclude_len;
@@ -48,7 +49,7 @@ int list_init(struct list_s *list)
 {
     list->chunks[0] = malloc(LIST_CHUNK_SIZE);
     if(list->chunks[0] == NULL)
-        return ENOMEM;
+        return errno;
 
     list->nchunk = 0;
     list->offset = 0;
@@ -56,6 +57,8 @@ int list_init(struct list_s *list)
     list->size = 0;
     list->current_chunk = 0;
     list->entry = (struct entry_s*)list->chunks[0];
+
+    return 0;
 }
 
 int list_add(struct list_s *list, char *path, struct entry_s *entry)
@@ -75,13 +78,13 @@ int list_add(struct list_s *list, char *path, struct entry_s *entry)
         if(list->chunks[list->nchunk] == NULL)
         {
             list->nchunk--;
-            return ENOMEM;
+            return errno;
         }
     }
 
     memcpy(list->entry, entry, offsetof(struct entry_s, path));
     memcpy(&list->entry->path, path, entry->len);
-    list->entry += entry->len + offsetof(struct entry_s, path);
+    list->entry = (struct entry_s*)(((char*)list->entry) + entry->len + offsetof(struct entry_s, path));
     list->offset += entry->len + offsetof(struct entry_s, path);
     list->len++;
     list->size += entry->size;
@@ -90,22 +93,19 @@ int list_add(struct list_s *list, char *path, struct entry_s *entry)
     return 0;
 }
 
-struct entry_s *list_next(struct list_s *list)
+struct entry_s *list_next(struct list_s *list, int *chunk, struct entry_s *entry)
 {
-    struct entry_s *entry;
-
-    if(list->current_chunk > list->nchunk)
+    if(chunk == NULL || *chunk > list->nchunk || entry == NULL || list == NULL)
         return NULL;
 
-    entry = list->entry;
-    list->entry += entry->len + offsetof(struct entry_s, path);
-    if(*((char*)list->entry) == 0)
+    entry = (struct entry_s*)(((char*)entry) + entry->len + offsetof(struct entry_s, path));
+    if(*((char*)entry) == 0)
     {
-        list->current_chunk++;
-        if(list->current_chunk > list->nchunk)
-            list->entry = NULL;
+        (*chunk)++;
+        if(*chunk > list->nchunk)
+            entry = NULL;
         else
-            list->entry = (struct entry_s*)list->chunks[list->current_chunk];
+            entry = (struct entry_s*)list->chunks[*chunk];
     }
 
     return entry;
@@ -128,7 +128,7 @@ int list_dir(const char *root_name)
     dir = opendir(root_name);
 
     if(!dir)
-        return ENOENT;
+        return errno;
 
     while(1)
     {
@@ -151,10 +151,11 @@ int list_dir(const char *root_name)
         else
             entry.len = snprintf(path, PATH_MAX, "%s/%s", root_name, name);
 
-        E(stat(path, &file_stat));
+        if(stat(path, &file_stat))
+            return errno;
 
         if(entry.len >= PATH_MAX)
-            return ENOENT;
+            return errno;
 
         entry.gid = file_stat.st_gid;
         entry.uid = file_stat.st_uid;
@@ -180,7 +181,8 @@ int list_dir(const char *root_name)
         }
     }
 
-    E(closedir(dir));
+    if(closedir(dir))
+        return errno;
 
     return 0;
 }
@@ -188,6 +190,7 @@ int list_dir(const char *root_name)
 struct thread_arg
 {
     struct entry_s *entry;
+    int chunk;
     char *cs;
     int error;
     int cnt;
@@ -195,36 +198,51 @@ struct thread_arg
 
 void *checksum_worker(void *varg)
 {
-    struct thread_arg arg = *((struct thread_arg*)varg);
-    unsigned char data[FILE_CHUNK_SIZE];
+    struct thread_arg *arg = (struct thread_arg*)varg;
+    unsigned char *data;
     MD5_CTX md5_context;
     FILE *file;
     int len;
 
-    for(int i = 0; i < arg.cnt; i++)
+    data = malloc(FILE_CHUNK_SIZE);
+    if(data == NULL)
     {
-        file = fopen(&arg.entry->path, "r");
+        arg->error = errno;
+        return NULL;
+    }
+
+    for(int i = 0; i < arg->cnt; i++)
+    {
+        file = fopen(&arg->entry->path, "r");
         if(file == NULL)
         {
-            arg.error = EACCES;
-            return NULL;
+            arg->error = errno;
+            return &arg->entry->path;
         }
 
         MD5_Init(&md5_context);
         while((len = fread(data, 1, FILE_CHUNK_SIZE, file)) != 0)
             MD5_Update(&md5_context, data, len);
-        MD5_Final(arg.cs, &md5_context);
+        MD5_Final(arg->cs, &md5_context);
+        list_next(&file_list, &arg->chunk, arg->entry);
+        arg->cs += MD5_DIGEST_LENGTH;
+        fclose(file);
     }
 
-    arg.error = 0;
+    free(data);
 
     return NULL;
 }
 
 int main(int argc, char **argv)
 {
+    struct thread_arg args[THREAD_COUNT];
+    struct entry_s *entry;
+    pthread_t threads[THREAD_COUNT];
     FILE *file;
-    int i;
+    char *cs, *cs_current, *error_file;
+    int pos, error, i;
+    long size_per_th, size_next_th, size_current;
 
     if(argc < 2)
     {
@@ -239,14 +257,14 @@ int main(int argc, char **argv)
         exclude_len = argc - 2;
     }
 
-    if(!list_init(&dir_list))
+    if(list_init(&dir_list))
     {
         fprintf(stderr, "Error: Out of memory\n");
         fflush(stderr);
         return ENOMEM;
     }
 
-    if(!list_init(&file_list))
+    if(list_init(&file_list))
     {
         list_del(&dir_list);
         fprintf(stderr, "Error: Out of memory\n");
@@ -272,31 +290,27 @@ int main(int argc, char **argv)
     file = fopen("/tmp/lnb_fileindexer_dirs", "w");
     if(file == NULL)
     {
+        error = errno;
         fprintf(stderr, "Error: Unable to open temp file\n");
         fflush(stderr);
-        return EIO;
+        list_del(&dir_list);
+        list_del(&file_list);
+        return error;
     }
 
-    struct entry_s *entry;
-    dir_list.current_chunk = 0;
-    dir_list.entry = (struct entry_s *)dir_list.chunks[0];
+    entry = (struct entry_s *)dir_list.chunks[0];
+    int chunk = 0;
     for(i = 0; i < dir_list.len; i++)
     {
-        entry = list_next(&dir_list);
         fprintf(file, "%s\t%d\t%d\t%d\n", &entry->path, entry->perm, entry->gid, entry->uid);
+        entry = list_next(&dir_list, &chunk, entry);
     }
 
     fclose(file);
     printf("Done\n");
     fflush(stdout);
 
-    pthread_t threads[THREAD_COUNT];
-    struct thread_arg args[THREAD_COUNT];
-    char *cs, *cs_current, pos;
-    int error;
-    long size_per_th, size_next_th, size_current;
-
-    printf("Calculating checksums... ");
+    printf("Calculating checksums with " STR(THREAD_COUNT) " treads... ");
     fflush(stdout);
     cs = malloc(file_list.len * 16);
     if(cs == NULL)
@@ -309,10 +323,9 @@ int main(int argc, char **argv)
     }
 
     pos = 0;
-    file_list.entry = (struct entry_s*)file_list.chunks[0];
-    file_list.current_chunk = 0;
+    entry = (struct entry_s*)file_list.chunks[0];
+    chunk = 0;
     size_per_th = file_list.size / THREAD_COUNT;
-    entry = file_list.entry;
     size_next_th = 0;
     size_current = 0;
     error = 0;
@@ -323,11 +336,12 @@ int main(int argc, char **argv)
         args[i].cnt = 0;
         args[i].error = 0;
         args[i].entry = entry;
+        args[i].chunk = chunk;
         args[i].cs = cs_current;
         size_next_th += size_per_th;
         do
         {
-            entry = list_next(&file_list);
+            entry = list_next(&file_list, &chunk, entry);
             size_current += entry->size;
             args[i].cnt++;
             pos++;
@@ -336,25 +350,31 @@ int main(int argc, char **argv)
         pthread_create(&threads[i], NULL, checksum_worker, &args[i]);
     }
     args[THREAD_COUNT - 1].cnt = file_list.len - pos;
-    args[i].entry = entry;
-    args[i].cs = cs_current;
-    args[THREAD_COUNT].error = 0;
-    pthread_create(&threads[i], NULL, checksum_worker, &args[THREAD_COUNT - 1]);
+    args[THREAD_COUNT - 1].entry = entry;
+    args[THREAD_COUNT - 1].chunk = chunk;
+    args[THREAD_COUNT - 1].cs = cs_current;
+    args[THREAD_COUNT - 1].error = 0;
+    pthread_create(&threads[THREAD_COUNT - 1], NULL, checksum_worker, &args[THREAD_COUNT - 1]);
 
     for(i = 0; i < THREAD_COUNT; i++)
     {
-            pthread_join(hreads[i], NULL);
+            pthread_join(threads[i], (void**)&error_file);
             error |= args[i].error;
     }
 
     if(error)
     {
-        fprintf(stderr, "Error: Cannot access all files");
+        if(error_file == NULL)
+            fprintf(stderr, "Error: Out of memory\n");
+        else
+            fprintf(stderr, "Error: Cannot access all files (e.g. %s)\n", error_file);
         fflush(stderr);
+        list_del(&dir_list);
+        list_del(&file_list);
         return EACCES;
     }
 
-    printf("Done");
+    printf("Done\n");
     fflush(stdout);
 
     printf("Listing files... ");
@@ -362,27 +382,32 @@ int main(int argc, char **argv)
     file = fopen("/tmp/lnb_fileindexer_files", "w");
     if(file == NULL)
     {
-        fprintf(stderr, "Error: Unable to open temp file");
+        list_del(&dir_list);
+        list_del(&file_list);
+        fprintf(stderr, "Error: Unable to open temp file\n");
         fflush(stderr);
         return EIO;
     }
 
-    file_list.entry = (struct entry_s*)file_list.chunks[0];
-    file_list.current_chunk = 0;
-    entry = file_list.entry;
+    entry = (struct entry_s*)file_list.chunks[0];
+    chunk = 0;
     cs_current = cs;
     for(i = 0; i < file_list.len; i++)
     {
         fprintf(file, "%s\t%d\t%d\t%d\t", &entry->path, entry->perm, entry->gid, entry->uid);
         for(int j = 0; j < MD5_DIGEST_LENGTH; j++)
         {
-            fprintf(file, "%X", cs_current);
+            fprintf(file, "%02hhX", *cs_current);
             cs_current++;
         }
         fprintf(file, "\n");
+        entry = list_next(&file_list, &chunk, entry);
     }
     fclose(file);
-    printf("Done");
+    free(cs);
+    list_del(&dir_list);
+    list_del(&file_list);
+    printf("Done\n");
     fflush(stdout);
 
     return 0;
