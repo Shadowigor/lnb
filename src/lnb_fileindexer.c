@@ -20,7 +20,6 @@
 #define THREAD_COUNT     16
 #define FILE_CHUNK_SIZE  134217728
 
-
 char **exclude;
 int exclude_len;
 
@@ -33,7 +32,7 @@ struct list_s
     int current_chunk;
     int len;
     long size;
-} file_list, dir_list;
+} file_list, dir_list, link_list;
 
 struct entry_s
 {
@@ -151,7 +150,7 @@ int list_dir(const char *root_name)
         else
             entry.len = snprintf(path, PATH_MAX, "%s/%s", root_name, name);
 
-        if(stat(path, &file_stat))
+        if(lstat(path, &file_stat))
             return errno;
 
         if(entry.len >= PATH_MAX)
@@ -162,7 +161,11 @@ int list_dir(const char *root_name)
         entry.perm = file_stat.st_mode & ALLPERMS;
         entry.size = file_stat.st_size;
 
-        if(S_ISDIR(file_stat.st_mode) && !S_ISLNK(file_stat.st_mode))
+        if(S_ISLNK(file_stat.st_mode))
+        {
+            E(list_add(&link_list, path, &entry));
+        }
+        else if(S_ISDIR(file_stat.st_mode))
         {
             E(list_add(&dir_list, path, &entry));
 
@@ -240,8 +243,8 @@ int main(int argc, char **argv)
     struct entry_s *entry;
     pthread_t threads[THREAD_COUNT];
     FILE *file;
-    char *cs, *cs_current, *error_file;
-    int pos, error, i;
+    char *cs, *cs_current, *error_file, path[PATH_MAX];
+    int pos, error, i, chunk;
     long size_per_th, size_next_th, size_current;
 
     if(argc < 2)
@@ -272,21 +275,31 @@ int main(int argc, char **argv)
         return ENOMEM;
     }
 
+    if(list_init(&link_list))
+    {
+        list_del(&link_list);
+        list_del(&dir_list);
+        fprintf(stderr, "Error: Out of memory\n");
+        fflush(stderr);
+        return ENOMEM;
+    }
+
     printf("Indexing files... ");
     fflush(stdout);
     if(list_dir(argv[1]))
     {
         list_del(&dir_list);
         list_del(&file_list);
+        list_del(&link_list);
         fprintf(stderr, "Error: Out of memory\n");
         fflush(stderr);
         return ENOMEM;
     }
-    printf("Done\n");
-    fflush(stdout);
 
+    printf("Done\n");
     printf("Listing directories... ");
     fflush(stdout);
+
     file = fopen("/tmp/lnb_fileindexer_dirs", "w");
     if(file == NULL)
     {
@@ -295,21 +308,46 @@ int main(int argc, char **argv)
         fflush(stderr);
         list_del(&dir_list);
         list_del(&file_list);
+        list_del(&link_list);
         return error;
     }
 
     entry = (struct entry_s *)dir_list.chunks[0];
-    int chunk = 0;
+    chunk = 0;
     for(i = 0; i < dir_list.len; i++)
     {
         fprintf(file, "%s\t%d\t%d\t%d\n", &entry->path, entry->perm, entry->gid, entry->uid);
         entry = list_next(&dir_list, &chunk, entry);
     }
-
     fclose(file);
+
     printf("Done\n");
+    printf("Listing links... ");
     fflush(stdout);
 
+    file = fopen("/tmp/lnb_fileindexer_link", "w");
+    if(file == NULL)
+    {
+        error = errno;
+        fprintf(stderr, "Error: Unable to open temp file\n");
+        fflush(stderr);
+        list_del(&dir_list);
+        list_del(&file_list);
+        list_del(&link_list);
+        return error;
+    }
+
+    entry = (struct entry_s *)link_list.chunks[0];
+    chunk = 0;
+    for(i = 0; i < link_list.len; i++)
+    {
+        pos = readlink(&entry->path, path, PATH_MAX);
+        path[pos] = '\0';
+        fprintf(file, "%s\t%d\t%d\t%d\t%s\n", &entry->path, entry->perm, entry->gid, entry->uid, path);
+        entry = list_next(&dir_list, &chunk, entry);
+    }
+
+    printf("Done\n");
     printf("Calculating checksums with " STR(THREAD_COUNT) " treads... ");
     fflush(stdout);
     cs = malloc(file_list.len * 16);
@@ -317,6 +355,7 @@ int main(int argc, char **argv)
     {
         list_del(&dir_list);
         list_del(&file_list);
+        list_del(&link_list);
         fprintf(stderr, "Error: Out of memory\n");
         fflush(stderr);
         return ENOMEM;
@@ -330,7 +369,7 @@ int main(int argc, char **argv)
     size_current = 0;
     error = 0;
     cs_current = cs;
-
+printf("\n");
     for(i = 0; i < THREAD_COUNT - 1; i++)
     {
         args[i].cnt = 0;
@@ -348,7 +387,10 @@ int main(int argc, char **argv)
             cs_current += MD5_DIGEST_LENGTH;
         } while(size_current < size_next_th);
         pthread_create(&threads[i], NULL, checksum_worker, &args[i]);
+        printf("Thread %2d: %d\n", i, size_current - (size_next_th - size_per_th));
     }
+    printf("Thread %2d: %d\n", THREAD_COUNT - 1, file_list.len - size_current);
+
     args[THREAD_COUNT - 1].cnt = file_list.len - pos;
     args[THREAD_COUNT - 1].entry = entry;
     args[THREAD_COUNT - 1].chunk = chunk;
@@ -371,6 +413,7 @@ int main(int argc, char **argv)
         fflush(stderr);
         list_del(&dir_list);
         list_del(&file_list);
+        list_del(&link_list);
         return EACCES;
     }
 
@@ -384,6 +427,7 @@ int main(int argc, char **argv)
     {
         list_del(&dir_list);
         list_del(&file_list);
+        list_del(&link_list);
         fprintf(stderr, "Error: Unable to open temp file\n");
         fflush(stderr);
         return EIO;
@@ -407,6 +451,7 @@ int main(int argc, char **argv)
     free(cs);
     list_del(&dir_list);
     list_del(&file_list);
+    list_del(&link_list);
     printf("Done\n");
     fflush(stdout);
 
