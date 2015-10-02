@@ -154,8 +154,17 @@ int list_dir(const char *root_name)
 
         entry.gid = file_stat.st_gid;
         entry.uid = file_stat.st_uid;
-        entry.perm = file_stat.st_mode & ALLPERMS;
         entry.time = file_stat.st_mtim.tv_sec;
+
+        entry.perm =  ((file_stat.st_mode & S_IXOTH)?1:0) |
+                      (((file_stat.st_mode & S_IWOTH)?1:0) << 1) |
+                      (((file_stat.st_mode & S_IROTH)?1:0) << 2) +
+                      (((file_stat.st_mode & S_IXGRP)?1:0) |
+                      (((file_stat.st_mode & S_IWGRP)?1:0) << 1) |
+                      (((file_stat.st_mode & S_IRGRP)?1:0) << 2)) * 10 +
+                      (((file_stat.st_mode & S_IXUSR)?1:0) |
+                      (((file_stat.st_mode & S_IWUSR)?1:0) << 1) |
+                      (((file_stat.st_mode & S_IRUSR)?1:0) << 2)) * 100;
 
         if(S_ISLNK(file_stat.st_mode))
         {
@@ -305,7 +314,7 @@ int main(int argc, char **argv)
         len = readlink(&entry->path, path, PATH_MAX);
         path[len] = '\0';
         fprintf(file, "%s\t%d\t%d\t%d\t%s\n", &entry->path, entry->perm, entry->gid, entry->uid, path);
-        entry = list_next(&dir_list, &chunk, entry);
+        entry = list_next(&link_list, &chunk, entry);
     }
 
     fclose(file);
