@@ -5,9 +5,7 @@ all:
 
 install:
 	cp bin/lnb bin/lnb_fileindexer /usr/bin/
-	if [ ! -d "/usr/share/lnb" ]; then
-		mkdir "/usr/share/lnb"
-	fi
+	mkdir -p "/usr/share/lnb"
 	cp scripts/* /usr/share/lnb
 
 .PHONY: clean
