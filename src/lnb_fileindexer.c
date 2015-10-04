@@ -104,7 +104,7 @@ struct entry_s *list_next(struct list_s *list, int *chunk, struct entry_s *entry
     return entry;
 }
 
-int list_del(struct list_s *list)
+void list_del(struct list_s *list)
 {
     for(int i = 0; i <= list->nchunk; i++)
     {
@@ -156,15 +156,15 @@ int list_dir(const char *root_name)
         entry.uid = file_stat.st_uid;
         entry.time = file_stat.st_mtim.tv_sec;
 
-        entry.perm =  ((file_stat.st_mode & S_IXOTH)?1:0) |
+        entry.perm =  (((file_stat.st_mode & S_IXOTH)?1:0) |
                       (((file_stat.st_mode & S_IWOTH)?1:0) << 1) |
-                      (((file_stat.st_mode & S_IROTH)?1:0) << 2) +
-                      (((file_stat.st_mode & S_IXGRP)?1:0) |
+                      (((file_stat.st_mode & S_IROTH)?1:0) << 2)) +
+                      ((((file_stat.st_mode & S_IXGRP)?1:0) |
                       (((file_stat.st_mode & S_IWGRP)?1:0) << 1) |
-                      (((file_stat.st_mode & S_IRGRP)?1:0) << 2)) * 10 +
-                      (((file_stat.st_mode & S_IXUSR)?1:0) |
+                      (((file_stat.st_mode & S_IRGRP)?1:0) << 2)) * 10) +
+                      ((((file_stat.st_mode & S_IXUSR)?1:0) |
                       (((file_stat.st_mode & S_IWUSR)?1:0) << 1) |
-                      (((file_stat.st_mode & S_IRUSR)?1:0) << 2)) * 100;
+                      (((file_stat.st_mode & S_IRUSR)?1:0) << 2)) * 100);
 
         if(S_ISLNK(file_stat.st_mode))
         {
@@ -174,8 +174,9 @@ int list_dir(const char *root_name)
         {
             E(list_add(&dir_list, path, &entry));
 
+            i = 0;
             if(exclude_len > 0)
-                for(i = 0; i < exclude_len; i++)
+                for(; i < exclude_len; i++)
                     if(!strcmp(exclude[i], path))
                         break;
 
