@@ -2,28 +2,40 @@
 
 # Standard configuration
 
-config_file="~/.lnb.conf
-remote_host=""
-remote_port=22
-source_path=""
+config_file="/home/alain/.lnb.conf"
+config_valid=""
+dest_host=""
+dest_port=22
+dest_ssh=""
+dest_ssh_rsync=""
 dest_path=""
-ssh_var=""
-bu_type="MANUAL"
+src_host=""
+src_port=22
+src_ssh=""
+src_path=""
+exclude=""
+last_name=""
+next_name=""
+link_to_dest=""
+manual=0
+TAB=$'\t'
 
 # Get config
 # ----------
 
-# Check if config file contains any invalid/malicious content
-config_valid=`$(cat "$config_file" | grep -Evi "^(#.*|[a-z]*='[a-z0-9 ]*')$")
+if [[ -f "$config_file" ]]; then
+    # Check if config file contains any invalid/malicious content
+#   config_valid=$(cat "$config_file" | grep -Evi "^(#.*|[a-z]*='[a-z0-9 ]*')$")
 
-if [ -n "$config_valid" ]; then
-    echo "Error in config file. Not allowed lines:"
-    echo $config_valid
-    exit 1
+    if [ -n "$config_valid" ]; then
+        echo "Error in config file. Not allowed lines:"
+        echo $config_valid
+        exit 1
+    fi
+    
+    # Read file
+    source "$config_file"
 fi
-
-# Read file
-source "$config_file"
 
 # Parse command line arguments
 while [[ $# > 0 ]]
@@ -31,18 +43,28 @@ while [[ $# > 0 ]]
     key="$1"
 
     case $key in
-        -r|--remote)
-            remote_host="$2"
+        -dh|--dest-host)
+            dest_host="$2"
             shift
             ;;
 
-        -p|--port)
-            remote_port="$2"
+        -sh|--src-host)
+            src_host="$2"
+            shift
+            ;;
+
+        -sp|--src-port)
+            src_port=$2
+            shift
+            ;;
+
+        -dp|--dest-port)
+            dest_port=$2
             shift
             ;;
 
         -s|--source)
-            sourch_path="$2"
+            src_path="$2"
             shift
             ;;
 
@@ -51,90 +73,197 @@ while [[ $# > 0 ]]
             shift
             ;;
 
-        -b|--base)
-            last_bu="$2"
+        -l|--last)
+            last_name="$2"
             shift
+            ;;
+
+        -n|--next)
+            next_name="$2"
+            shift
+            ;;
+
+        -e|--exclude)
+            exclude="$exclude $2"
+            shift
+            ;;
+
+        -m|--manual)
+            manual=1
             ;;
 
         -h|--help)
             echo "Usage: lnb [OPTIONS]"
+            exit 0
             ;;
 
         *)
-            echo "Unknown option 'key'"
+            echo "Unknown option '$key'"
             exit 64 # EX_USAGE
             ;;
     esac
     shift
 done
 
-# Execute command locally or remotely
-function exon {
-    if [[ -n $remote_host ]]; then
-        echo "$@" | ssh $sshvar $remote_host
-	else
-	    "$@"
+id -u > /dev/null
+if [[ $? -ne 0 ]]; then
+    echo -n "Warning: Not running this program as root might lead to an incomplete backup! Continue? [Y/n] " > /dev/stderr
+    read user_input
+    if [[ $? -ne 0 ]] || ( [[ $user_input != "y" ]] && [[ -n $user_input ]] ); then
+        exit 1 # EPERM
+    fi
+fi
+
+# Execute command on source machine
+function onsrc
+{
+    if [[ -n $src_host ]]; then
+        echo "$@" | ssh -q $src_ssh $src_host
+    else
+	    eval "$@"
+    fi
+}
+
+# Execute command on destination machine
+function ondest
+{
+    if [[ -n $dest_host ]]; then
+        echo "$@" | ssh -q $dest_ssh $dest_host
+    else
+        eval "$@"
     fi
 }
 
 # Initialize
 # ----------
 
-dest_full="$dest_path"
-
-if [[ -n $remote_host ]]; then
+if [[ -n $src_host ]]; then
     # Set path where the ssh session will be stored
-    sshvar=-S "$HOME/.ssh/ctl/%L-%r@%h:%p"
+    src_ssh="-p $src_port -S \"$HOME/.ssh/%L-%r@%h:%p\""
 
     # Open ssh tunnel
-    ssh -nNM -p $remote_port $ssvar $remote_host
-
-    # Combine remote host with path
-    dest_full=$remote_host:"$dest_path"
+    ssh -nNMf $src_ssh $src_host
+    
+    if [[ $? -ne 0 ]]; then
+        echo "Error: Unable to connect to source via ssh"
+        exit 1
+    fi
+    
+    # Modify ssh variable for rsync
+    src_ssh_rsync="-e \"ssh $src_ssh\""
+    
+    # Fuck all those goddamn quotes!!!
+    onsrc "mkdir '/tmp/lnb_scripts'"
+    rsync -e "ssh $src_ssh" /usr/share/lnb/* $src_host:'/tmp/lnb_scripts'
+else
+    mkdir '/tmp/lnb_scripts'
+    cp /usr/share/lnb/* '/tmp/lnb_scripts'
 fi
 
+if [[ -n $dest_host ]]; then
+    # Set path where the ssh session will be stored
+    if [[ -n $src_host ]]; then
+        dest_ssh="-p $dest_port -S \$HOME/.ssh/%L-%r@%h:%p"
+    else
+        dest_ssh="-p $dest_port -S $HOME/.ssh/%L-%r@%h:%p"
+    fi
+
+    # Open ssh tunnel
+    onsrc "ssh -nNMf $dest_ssh $dest_host"
+    
+    if [[ $? -ne 0 ]]; then
+        echo "Error: Unable to connect to destination via ssh"
+        exit 11 # EAGAIN
+    fi
+
+    # Combine destination host with path
+    dest_full=$dest_host:"$dest_path"
+    
+    # Modify ssh variable for rsync
+    dest_ssh_rsync="-e \"ssh $dest_ssh\""
+
+    ondest "mkdir '/tmp/lnb_scripts'"
+    rsync -e "ssh $dest_ssh" /usr/share/lnb/* $dest_host:'/tmp/lnb_scripts'
+else
+    if [[ -n $src_host ]]; then
+        mkdir '/tmp/lnb_scripts' > /dev/null
+        cp /usr/share/lnb/* '/tmp/lnb_scripts'
+    fi
+
+    # Initialize full destination path
+    dest_full="$dest_path"
+fi
+
+if [[ $manual -eq 0 ]]; then
+    IFS=' ' read -a names <<< "$(ondest "bash '/tmp/lnb_scripts/daily_pre.sh' '$dest_path'")"
+    last_name=${names[0]}
+    next_name=${names[1]}
+    dest_path="$dest_path/raw"
+    dest_full="$dest_full/raw"
+fi
+
+# Remove previous backups with the same name
+ondest "rm -rf '$dest_path/$next_name' '$dest_path/.meta/$next_name'"
+
 # Create destination root
-exon mkdir -p "$dest_path"
+ondest "mkdir -p '$dest_path/$next_name'"
+
+# Create destination metadata directory for next backup
+ondest "mkdir '$dest_path/.meta/$next_name'"
 
 # Sync
 # ----
 
-# Create dir where the metadata of the last backup will be stored
-mkdir /tmp/lnb_dest
-
-# Get metadata of last backup
-rsync $sshvar "$dest_full/tmp/*" /tmp/lnb_dest
-
 # Generate current metadata
-lnb_fileindexer $source_path
+onsrc "lnb_fileindexer '$src_path' $exclude"
+
+# Sort files
+onsrc "bash /tmp/lnb_scripts/src_sort_files.sh"
+
+# Write current metadata to destination
+onsrc "rsync $dest_ssh_rsync /tmp/lnb_fileindexer* '$dest_full/.meta/$next_name'"
 
 # Generate file lists
-comm -12 /tmp/lnb_fileindexer_files /tmp/lnb_dest/lnb_fileindexer_files > /tmp/lnb_to_link
-comm -23 /tmp/lnb_fileindexer_files /tmp/lnb_dest/lnb_fileindexer_files > /tmp/lnb_to_copy
+ondest "bash /tmp/lnb_scripts/dest_generate_lists.sh '$dest_path' '$last_name' '$next_name'"
+
+if [[ -n $dest_host ]]; then
+    # Get files that need to be copied
+    onsrc "rsync $dest_ssh_rsync $dest_host:/tmp/lnb_to_copy /tmp/lnb_to_copy"
+fi
 
 # Backup
 # ------
 
 # Create complete directory structure
-exon awk "{system(\"mkdir -p \"$dest_path/\$1\"\");}" "/tmp/lnb_fileindexer_dirs"
+ondest "bash /tmp/lnb_scripts/dest_mkdir.sh '$dest_path' '$next_name'"
 
 # Copy files that changed
-rsync $sshvar -az --info=progress2 --files-from="/tmp/lnb_fileindexer_to_copy" / "$dest_full"
+onsrc "rsync $dest_ssh_rsync -azH --info=progress2 --files-from='/tmp/lnb_to_copy' '$src_path' '$dest_full/$next_name'"
 
 # Link the rest of the files
-exon awk "{system(\"ln \"$last_bu/\$1\" \"$dest_path\$2\"\");}" "/tmp/lnb_fileindexer_to_link"
+ondest "awk -F '$TAB' -v last_path='$dest_path/$last_name' -v next_path='$dest_path/$next_name' -f '/tmp/lnb_scripts/link_files.awk' /tmp/lnb_to_link"
+
+# Set permissions
+ondest "bash /tmp/lnb_scripts/dest_set_perms.sh '$dest_path' '$next_name'"
 
 # Finalize
 # --------
 
-# Copy current metadata to backup
-exon mkdir "$dest_full/tmp"
-rsync $sshvar /tmp/lnb_fileindexer_files "$dest_full/tmp/lnb_fileindexer_files"
+# Link backup order
+if [[ $manual -eq 0 ]]; then
+    ondest "bash '/tmp/lnb_scripts/daily_post.sh' '$dest_path'"
+fi
 
 # Remove temp files
-rm -r /tmp/lnb*
+onsrc "rm -rf /tmp/lnb*"
+ondest "rm -rf /tmp/lnb*"
 
-if [[ -n $remote_host ]]; then 
+if [[ -n $src_host ]]; then 
     # Close ssh tunnel
-    ssh -O exit -p $remote_port $sshvar $remote_host
+    ssh -q -O exit $src_ssh $src_host
+fi
+
+if [[ -n $dest_host ]]; then 
+    # Close ssh tunnel
+    onsrc "ssh -O exit $dest_ssh $dest_host"
 fi
