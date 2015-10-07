@@ -1,2 +1,5 @@
-# Excluding .creator.user file
+lnb.creator
 lnb.creator.user
+lnb.files
+lnb.includes
+lnb.config
