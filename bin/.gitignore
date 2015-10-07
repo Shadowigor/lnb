@@ -1,2 +1,3 @@
+# Empty .gitignore, so that the directory gets created anyway
 *
 !.gitignore
