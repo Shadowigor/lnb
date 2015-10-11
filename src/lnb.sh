@@ -16,23 +16,13 @@ src_path=""
 exclude=""
 last_name=""
 next_name=""
-link_to_dest=""
 manual=0
 TAB=$'\t'
 
 # Get config
 # ----------
 
-if [[ -f "$config_file" ]]; then
-    # Check if config file contains any invalid/malicious content
-#   config_valid=$(cat "$config_file" | grep -Evi "^(#.*|[a-z]*='[a-z0-9 ]*')$")
-
-    if [ -n "$config_valid" ]; then
-        echo "Error in config file. Not allowed lines:"
-        echo $config_valid
-        exit 1
-    fi
-    
+if [[ -f "$config_file" ]]; then 
     # Read file
     source "$config_file"
 fi
@@ -104,6 +94,26 @@ while [[ $# > 0 ]]
     esac
     shift
 done
+
+if [[ -z "$dest_path" ]]; then
+    echo "Error: Destination path not set" > /dev/stderr
+    exit 22 # EINVAL
+fi
+
+if [[ -z "$src_path" ]]; then
+    echo "Error: Source path not set" > /dev/stderr
+    exit 22 # EINVAL
+fi
+
+if [[ -z "$last_name" ]] && [[ $manual -ne 0 ]]; then
+    echo "Error: Name of last backup not set" > /dev/stderr
+    exit 22 # EINVAL
+fi
+
+if [[ -z "$next_name" ]] && [[ $manual -ne 0 ]]; then
+    echo "Error: Name of backup not set" > /dev/stderr
+    exit 22 # EINVAL
+fi
 
 id -u > /dev/null
 if [[ $? -ne 0 ]]; then
@@ -202,6 +212,11 @@ if [[ $manual -eq 0 ]]; then
     dest_full="$dest_full/raw"
 fi
 
+if [[ -z "$(ondest "bash -c 'if [[ -e \'$dest_path/$last_name\' ]]; then echo \'e\'; fi'")" ]]; then
+    echo "Error: There is no base for the backup" > /dev/stderr
+    exit 2 # ENOENT
+fi
+
 # Remove previous backups with the same name
 ondest "rm -rf '$dest_path/$next_name' '$dest_path/.meta/$next_name'"
 
@@ -209,7 +224,7 @@ ondest "rm -rf '$dest_path/$next_name' '$dest_path/.meta/$next_name'"
 ondest "mkdir -p '$dest_path/$next_name'"
 
 # Create destination metadata directory for next backup
-ondest "mkdir '$dest_path/.meta/$next_name'"
+ondest "mkdir -p '$dest_path/.meta/$next_name'"
 
 # Sync
 # ----
