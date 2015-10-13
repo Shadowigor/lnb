@@ -149,7 +149,7 @@ function ondest
 
 if [[ -n $src_host ]]; then
     # Set path where the ssh session will be stored
-    src_ssh="-p $src_port -S \"$HOME/.ssh/%L-%r@%h:%p\""
+    src_ssh="-p $src_port -o ServerAliveInterval=100 -S \"$HOME/.ssh/%L-%r@%h:%p\""
 
     # Open ssh tunnel
     ssh -nNMf $src_ssh $src_host
@@ -173,9 +173,9 @@ fi
 if [[ -n $dest_host ]]; then
     # Set path where the ssh session will be stored
     if [[ -n $src_host ]]; then
-        dest_ssh="-p $dest_port -S \$HOME/.ssh/%L-%r@%h:%p"
+        dest_ssh="-p $dest_port -o ServerAliveInterval=100 -S \$HOME/.ssh/%L-%r@%h:%p"
     else
-        dest_ssh="-p $dest_port -S $HOME/.ssh/%L-%r@%h:%p"
+        dest_ssh="-p $dest_port -o ServerAliveInterval=100 -S $HOME/.ssh/%L-%r@%h:%p"
     fi
 
     # Open ssh tunnel
@@ -273,12 +273,12 @@ fi
 onsrc "rm -rf /tmp/lnb*"
 ondest "rm -rf /tmp/lnb*"
 
-if [[ -n $src_host ]]; then 
-    # Close ssh tunnel
-    ssh -q -O exit $src_ssh $src_host
-fi
-
 if [[ -n $dest_host ]]; then 
     # Close ssh tunnel
     onsrc "ssh -O exit $dest_ssh $dest_host"
+fi
+
+if [[ -n $src_host ]]; then 
+    # Close ssh tunnel
+    ssh -q -O exit $src_ssh $src_host
 fi
