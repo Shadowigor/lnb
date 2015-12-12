@@ -218,7 +218,7 @@ if [[ -z "$(ondest "bash -c 'if [[ -e \'$dest_path/$last_name\' ]]; then echo \'
 fi
 
 # Remove previous backups with the same name
-ondest "rm -rf '$dest_path/$next_name' '$dest_path/.meta/$next_name'"
+ondest "sudo rm -rf '$dest_path/$next_name' '$dest_path/.meta/$next_name'"
 
 # Create destination root
 ondest "mkdir -p '$dest_path/$next_name'"
